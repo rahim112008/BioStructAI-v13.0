@@ -1,6 +1,7 @@
 """
-BioStruct AI v13.0 - Plateforme intégrée de bioinformatique structurale
-Fichier unique - 37 modules
+BioStruct AI v14.0 - Plateforme intégrée de bioinformatique structurale
+Multi-LLM : OpenAI, Groq, Gemini, Mistral, Cerebras, OpenRouter, Ollama, HuggingFace
+37+ modules - Fichier unique
 """
 
 import streamlit as st
@@ -10,10 +11,9 @@ import pandas as pd
 import numpy as np
 import requests
 from io import StringIO
-import tempfile, os, json, hashlib, subprocess, shutil, importlib, inspect, io
+import tempfile, os, json, hashlib, importlib, inspect, io
 from datetime import datetime
 from collections import Counter
-from pathlib import Path
 from abc import ABC, abstractmethod
 
 from Bio.PDB import PDBParser
@@ -28,10 +28,9 @@ from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.metrics import (roc_curve, auc, roc_auc_score, accuracy_score,
                               precision_score, recall_score, f1_score)
 from scipy.spatial.distance import pdist, squareform
-from scipy.stats import entropy, ttest_ind, mannwhitneyu
+from scipy.stats import entropy, ttest_ind
 from statsmodels.stats.multitest import multipletests
 
-# --- Modules optionnels ---
 try:
     import matplotlib
     matplotlib.use("Agg")
@@ -121,36 +120,6 @@ def get_or_create_user(email):
     except Exception:
         return None
 
-def create_project(owner_id, name):
-    supabase = get_supabase_client()
-    if not supabase: return None
-    try:
-        p = supabase.table("projects").insert({"name": name, "owner_id": owner_id}).execute().data[0]
-        supabase.table("project_members").insert({"project_id": p["id"], "user_id": owner_id, "role": "owner"}).execute()
-        return p
-    except Exception:
-        return None
-
-def join_project(pid, uid):
-    supabase = get_supabase_client()
-    if not supabase: return False
-    try:
-        supabase.table("project_members").insert({"project_id": pid, "user_id": uid, "role": "editor"}).execute()
-        return True
-    except Exception:
-        return False
-
-def get_user_projects(uid):
-    supabase = get_supabase_client()
-    if not supabase: return []
-    try:
-        m = supabase.table("project_members").select("project_id").eq("user_id", uid).execute()
-        if not m.data: return []
-        ids = [x["project_id"] for x in m.data]
-        return supabase.table("projects").select("*").in_("id", ids).execute().data
-    except Exception:
-        return []
-
 def save_analysis(uid, atype, inputs, results, pid=None, capsule=None):
     supabase = get_supabase_client()
     if not supabase: return None
@@ -172,7 +141,7 @@ def load_analyses(uid):
     except Exception:
         return []
 
-def generate_capsule(atype, inputs, params, version="13.0.0"):
+def generate_capsule(atype, inputs, params, version="14.0.0"):
     chk = json.dumps(inputs, sort_keys=True, default=str)
     return {"version": version, "analysis_type": atype,
             "timestamp": datetime.now().isoformat(),
@@ -488,11 +457,6 @@ def run_kmeans(fm, k=3):
     X = StandardScaler().fit_transform(fm)
     return KMeans(n_clusters=k, n_init=10, random_state=42).fit_predict(X)
 
-def run_hierarchical(fm, k=3):
-    if len(fm) < 2: return np.array([0] * len(fm))
-    X = StandardScaler().fit_transform(fm)
-    return AgglomerativeClustering(n_clusters=min(k, len(fm)), linkage="ward").fit_predict(X)
-
 def cohen_d(x, y):
     nx, ny = len(x), len(y)
     if nx < 2 or ny < 2: return 0.0
@@ -501,16 +465,9 @@ def cohen_d(x, y):
     if pooled < 1e-9: return 0.0
     return float((np.mean(x) - np.mean(y)) / pooled)
 
-def cliffs_delta(x, y):
-    if len(x) < 2 or len(y) < 2: return 0.0
-    g = sum(1 for xi in x for yi in y if xi > yi)
-    l = sum(1 for xi in x for yi in y if xi < yi)
-    return float((g - l) / (len(x) * len(y)))
-
 def statistical_test_features(df, groups, feature_cols):
     ga, gb = groups[0], groups[1]
-    mask_a = df["_group"] == ga
-    mask_b = df["_group"] == gb
+    mask_a = df["_group"] == ga; mask_b = df["_group"] == gb
     results = []
     for feat in feature_cols:
         x = df.loc[mask_a, feat].dropna().values
@@ -519,52 +476,28 @@ def statistical_test_features(df, groups, feature_cols):
         try: _, p = ttest_ind(x, y, equal_var=False)
         except Exception: p = 1.0
         d = cohen_d(x, y)
-        delta = cliffs_delta(x, y)
-        mean_a, mean_b = float(np.mean(x)), float(np.mean(y))
-        direction = ga if mean_a > mean_b else gb
+        direction = ga if np.mean(x) > np.mean(y) else gb
         abs_d = abs(d)
         mag = "🟢 Large" if abs_d >= 0.8 else "🟡 Moyenne" if abs_d >= 0.5 else "🟠 Petite" if abs_d >= 0.2 else "⚪ Négligeable"
-        results.append({"Feature": feat, f"Moy {ga}": round(mean_a, 4),
-                       f"Moy {gb}": round(mean_b, 4), "p-value": p,
-                       "Cohen's d": round(d, 3), "Cliff's delta": round(delta, 3),
-                       "Direction": direction, "Taille d'effet": mag,
-                       "-log10(p)": round(-np.log10(max(p, 1e-300)), 2)})
+        results.append({"Feature": feat, "Moy "+ga: round(float(np.mean(x)), 4),
+                       "Moy "+gb: round(float(np.mean(y)), 4), "p-value": p,
+                       "Cohen's d": round(d, 3), "Direction": direction,
+                       "Taille d'effet": mag, "-log10(p)": round(-np.log10(max(p, 1e-300)), 2)})
     df_res = pd.DataFrame(results).sort_values("p-value")
     if len(df_res) > 0:
         _, fdr, _, _ = multipletests(df_res["p-value"].values, method="fdr_bh")
         df_res["FDR"] = fdr
-        df_res["Significatif (FDR<0.05)"] = df_res["FDR"] < 0.05
     return df_res
 
 def rank_biomarkers(df_stats):
     if df_stats is None or len(df_stats) == 0: return None
-    r = df_stats[["Feature", "Cohen's d", "p-value", "-log10(p)", "Direction", "Taille d'effet"]].copy()
+    r = df_stats.copy()
     r["abs_d"] = r["Cohen's d"].abs()
     def norm(s):
         if s.max() - s.min() < 1e-9: return pd.Series([0]*len(s), index=s.index)
         return (s - s.min()) / (s.max() - s.min())
-    r["score_effect"] = norm(r["abs_d"])
-    r["score_pvalue"] = norm(r["-log10(p)"])
-    r["Score biomarqueur"] = (0.5 * r["score_effect"] + 0.5 * r["score_pvalue"]).round(4)
-    r = r.sort_values("Score biomarqueur", ascending=False)
-    r["Rang"] = range(1, len(r) + 1)
-    return r
-
-def compare_signatures(s1, s2):
-    keys = set(s1.keys()) & set(s2.keys()); keys.discard("label")
-    diffs = []
-    for k in sorted(keys):
-        v1, v2 = s1[k], s2[k]
-        if isinstance(v1, (int, float)) and isinstance(v2, (int, float)):
-            denom = max(abs(v1), abs(v2), 1e-6)
-            pct = 100 * abs(v1 - v2) / denom
-            diffs.append({"Propriété": k, "Protéine 1": round(float(v1), 4),
-                         "Protéine 2": round(float(v2), 4),
-                         "Différence (%)": round(pct, 2),
-                         "Similarité": "✓" if pct < 10 else ("~" if pct < 30 else "✗")})
-    df = pd.DataFrame(diffs).sort_values("Différence (%)", ascending=False)
-    sim = max(0, 100 - np.mean([d["Différence (%)"] for d in diffs])) if diffs else 0
-    return df, round(sim, 2)
+    r["Score biomarqueur"] = (0.5 * norm(r["abs_d"]) + 0.5 * norm(r["-log10(p)"])).round(4)
+    return r.sort_values("Score biomarqueur", ascending=False)
 
 
 # ============================================================
@@ -614,8 +547,7 @@ def detect_cavities(structure, min_volume=100, max_cavities=5):
                     touches_border = False
                     while stack and len(region) < 200:
                         cx, cy, cz = stack.pop()
-                        if not (0 <= cx < grid_size and 0 <= cy < grid_size and 0 <= cz < grid_size):
-                            continue
+                        if not (0 <= cx < grid_size and 0 <= cy < grid_size and 0 <= cz < grid_size): continue
                         if visited[cx, cy, cz] or grid[cx, cy, cz] == 1: continue
                         if cx < 2 or cx > grid_size-3 or cy < 2 or cy > grid_size-3 or cz < 2 or cz > grid_size-3:
                             touches_border = True
@@ -625,12 +557,10 @@ def detect_cavities(structure, min_volume=100, max_cavities=5):
                             stack.append((cx+dx, cy+dy, cz+dz))
                     if not touches_border and len(region) >= 10:
                         region_coords = np.array(region)
-                        center_cell = region_coords.mean(axis=0)
-                        center_xyz = origin + center_cell * cell_size
+                        center_xyz = origin + region_coords.mean(axis=0) * cell_size
                         volume = len(region) * (cell_size ** 3)
                         if volume >= min_volume:
-                            cavities.append({"center": tuple(center_xyz),
-                                            "volume_A3": round(volume, 1)})
+                            cavities.append({"center": tuple(center_xyz), "volume_A3": round(volume, 1)})
     cavities = sorted(cavities, key=lambda c: -c["volume_A3"])[:max_cavities]
     for cav in cavities:
         v = cav["volume_A3"]
@@ -638,16 +568,15 @@ def detect_cavities(structure, min_volume=100, max_cavities=5):
     return cavities
 
 def identify_interface_residues(sa, sb, cutoff=6.0):
+    from scipy.spatial import cKDTree
     atoms_a = [(a.coord, a.get_parent().resname, a.get_parent().id[1], a.get_parent().get_parent().id) for a in sa.get_atoms()]
     atoms_b = [(a.coord, a.get_parent().resname, a.get_parent().id[1], a.get_parent().get_parent().id) for a in sb.get_atoms()]
     coords_b = np.array([x[0] for x in atoms_b])
     if len(atoms_a) > 2000 or len(atoms_b) > 2000: return [], []
-    from scipy.spatial import cKDTree
     tree_b = cKDTree(coords_b)
     ia, ib = set(), set()
     for i, (ca, res_a, id_a, ch_a) in enumerate(atoms_a):
-        idx = tree_b.query_ball_point(ca, cutoff)
-        for j in idx:
+        for j in tree_b.query_ball_point(ca, cutoff):
             ia.add(f"{ch_a}:{res_a}{id_a}")
             ib.add(f"{atoms_b[j][3]}:{atoms_b[j][1]}{atoms_b[j][2]}")
     return sorted(ia), sorted(ib)
@@ -664,9 +593,7 @@ def simulate_expression_matrix(n_genes=300, n_samples=20, seed=42):
     n_case = n_samples - n_ctrl
     sample_names = [f"Ctrl_{i+1}" for i in range(n_ctrl)] + [f"Case_{i+1}" for i in range(n_case)]
     base = np.random.lognormal(mean=5, sigma=1.5, size=(n_genes, n_samples))
-    n_de = int(n_genes * 0.1)
-    de_idx = np.random.choice(n_genes, n_de, replace=False)
-    for idx in de_idx:
+    for idx in np.random.choice(n_genes, int(n_genes * 0.1), replace=False):
         fc = np.random.uniform(1.5, 4.0) * np.random.choice([-1, 1])
         base[idx, n_ctrl:] *= np.exp(fc / 2)
     return pd.DataFrame(base, index=gene_names, columns=sample_names), \
@@ -712,8 +639,7 @@ def simulate_ualcan_subgroups(gene, cancer="BRCA", subgroup="stage", seed=42):
     rows = []
     for cat in cats:
         n = np.random.randint(20, 80)
-        idx = cats.index(cat)
-        fc = 1 + idx * np.random.uniform(0.3, 0.8)
+        fc = 1 + cats.index(cat) * np.random.uniform(0.3, 0.8)
         for e in np.random.lognormal(mean=4 + np.log(fc), sigma=0.9, size=n):
             rows.append({"Subgroupe": cat, "Expression": e, "Gène": gene, "Cancer": cancer})
     return pd.DataFrame(rows)
@@ -745,8 +671,7 @@ def train_xgboost_classifier(df_ml, top_n=50):
                "F1": round(f1_score(y_test, y_pred, zero_division=0), 4)}
     importance = pd.DataFrame({"Feature": ["|log2FC|", "-log10(FDR)", "Δ Expression", "Score composite"],
                               "Importance": model.feature_importances_}).sort_values("Importance", ascending=False)
-    return {"metrics": metrics, "importance": importance,
-            "y_test": y_test, "y_pred": y_pred, "y_proba": y_proba}
+    return {"metrics": metrics, "importance": importance}
 
 
 # ============================================================
@@ -771,13 +696,9 @@ def predict_mutation_impact(structure, mutation):
         return None
     if "CA" not in residue: return None
     ca_coord = residue["CA"].coord
-    neighbors = []
-    for oc in structure.get_chains():
-        for ores in oc.get_residues():
-            if ores.id[0] != " " or ores == residue or "CA" not in ores: continue
-            d = np.linalg.norm(ores["CA"].coord - ca_coord)
-            if d < 8.0: neighbors.append({"residue": f"{oc.id}:{ores.resname}{ores.id[1]}", "distance": round(float(d), 2)})
-    accessibility = len(neighbors)
+    accessibility = sum(1 for oc in structure.get_chains() for ores in oc.get_residues()
+                        if ores.id[0] == " " and ores != residue and "CA" in ores
+                        and np.linalg.norm(ores["CA"].coord - ca_coord) < 8.0)
     old_aa, new_aa = mutation["Original"], mutation["Mutant"]
     if old_aa in AA_PROPERTIES and new_aa in AA_PROPERTIES:
         dh = AA_PROPERTIES[new_aa][0] - AA_PROPERTIES[old_aa][0]
@@ -802,8 +723,7 @@ def saturation_mutagenesis(structure, chain_id, position):
                                                       "Original": original_aa, "Mutant": new_aa})
         if impact:
             results.append({"Mutation": f"{original_aa}{position}{new_aa}",
-                           "ΔΔG (kcal/mol)": impact["ΔΔG_prédit"],
-                           "Stabilité": impact["stabilité"]})
+                           "ΔΔG (kcal/mol)": impact["ΔΔG_prédit"], "Stabilité": impact["stabilité"]})
     df = pd.DataFrame(results)
     return df.sort_values("ΔΔG (kcal/mol)") if len(df) > 0 else df
 
@@ -817,23 +737,18 @@ def propose_stabilizing_mutations(structure, top_n=10):
                     and np.linalg.norm(a.coord - ca) < 6.0)
             r, p = residue.resname, residue.id[1]
             if r == "GLY" and n > 20:
-                proposals.append({"Mutation": f"G{p}A", "Chaîne": chain.id,
-                                 "Raison": "Gly enfoui → Ala", "Score": 0.7})
+                proposals.append({"Mutation": f"G{p}A", "Chaîne": chain.id, "Raison": "Gly enfoui → Ala", "Score": 0.7})
             elif r == "LYS" and n < 15:
-                proposals.append({"Mutation": f"K{p}R", "Chaîne": chain.id,
-                                 "Raison": "Lys surface → Arg", "Score": 0.5})
+                proposals.append({"Mutation": f"K{p}R", "Chaîne": chain.id, "Raison": "Lys surface → Arg", "Score": 0.5})
             elif r == "SER" and n > 18:
-                proposals.append({"Mutation": f"S{p}A", "Chaîne": chain.id,
-                                 "Raison": "Ser → Ala", "Score": 0.6})
+                proposals.append({"Mutation": f"S{p}A", "Chaîne": chain.id, "Raison": "Ser → Ala", "Score": 0.6})
     df = pd.DataFrame(proposals)
     return df.sort_values("Score", ascending=False).head(top_n) if len(df) > 0 else df
 
 def identify_disulfide_opportunities(structure):
-    cys = []
-    for chain in structure.get_chains():
-        for r in chain.get_residues():
-            if r.id[0] == " " and r.resname == "CYS" and "SG" in r:
-                cys.append({"chain": chain.id, "pos": r.id[1], "coord": r["SG"].coord})
+    cys = [{"chain": chain.id, "pos": r.id[1], "coord": r["SG"].coord}
+           for chain in structure.get_chains()
+           for r in chain.get_residues() if r.id[0] == " " and r.resname == "CYS" and "SG" in r]
     if len(cys) < 2: return pd.DataFrame()
     pairs = []
     for i in range(len(cys)):
@@ -850,20 +765,17 @@ def generate_variant_library(structure, positions):
     library = []
     for chain_id, pos in positions:
         try:
-            residue = structure[0][chain_id][(" ", pos, " ")]
-            original = residue.resname
+            original = structure[0][chain_id][(" ", pos, " ")].resname
         except Exception: continue
         for new_aa in AA_PROPERTIES.keys():
             if new_aa == original: continue
             impact = predict_mutation_impact(structure, {"Chaîne": chain_id, "Position": pos,
                                                           "Original": original, "Mutant": new_aa})
             if impact:
-                library.append({"Variant_ID": f"{original}{pos}{new_aa}",
-                               "Chaîne": chain_id, "Position": pos,
-                               "Original": original, "Mutant": new_aa,
+                library.append({"Variant_ID": f"{original}{pos}{new_aa}", "Chaîne": chain_id,
+                               "Position": pos, "Original": original, "Mutant": new_aa,
                                "Type": classify_mutation_type(original, new_aa),
-                               "ΔΔG (kcal/mol)": impact["ΔΔG_prédit"],
-                               "Stabilité": impact["stabilité"]})
+                               "ΔΔG (kcal/mol)": impact["ΔΔG_prédit"], "Stabilité": impact["stabilité"]})
     return pd.DataFrame(library)
 
 def aa3to1(aa3):
@@ -884,8 +796,7 @@ def generate_lab_protocol(structure, mutations, enzyme="Q5"):
         pos = mut["Position"]
         if pos < 1 or pos > len(seq): continue
         old = aa3to1(mut["Original"]); new = aa3to1(mut["Mutant"])
-        flank = 18
-        start = max(0, pos - 1 - flank); end = min(len(seq), pos - 1 + flank + 1)
+        start = max(0, pos - 1 - 18); end = min(len(seq), pos - 1 + 19)
         fwd = seq[start:pos-1] + new + seq[pos:end]
         rev = reverse_complement(fwd)
         primers.append({"Mutation": f"{old}{pos}{new}", "Fwd": fwd, "Rev": rev,
@@ -899,7 +810,7 @@ def generate_lab_protocol(structure, mutations, enzyme="Q5"):
 
 
 # ============================================================
-# SECTION 10 : COPILOTE IA
+# SECTION 10 : COPILOTE IA (outils)
 # ============================================================
 
 def build_copilot_tools():
@@ -935,58 +846,247 @@ def execute_copilot_tool(name, args):
         return f"Erreur : {e}"
     return "Inconnu."
 
-def run_copilot(msg, history):
-    client = get_openai_client()
-    if not client: return "⚠️ Copilote non configuré."
-    system = "Tu es BioStruct Copilot v13, expert en bioinformatique structurale et ingénierie des protéines."
-    messages = [{"role": "system", "content": system}] + history + [{"role": "user", "content": msg}]
+
+# ============================================================
+# SECTION 10B : MODULE MULTI-LLM (v14)
+# ============================================================
+
+LLM_PROVIDERS = {
+    "OpenAI (payant)": {
+        "category": "☁️ API Cloud",
+        "base_url": "https://api.openai.com/v1",
+        "models": ["gpt-4o-mini", "gpt-4o", "gpt-3.5-turbo"],
+        "default_model": "gpt-4o-mini",
+        "secret_key": "openai", "requires_key": True, "free": False,
+        "rate_limit": "Payant",
+        "description": "Haute performance, multimodal"
+    },
+    "Groq (gratuit)": {
+        "category": "☁️ API Cloud",
+        "base_url": "https://api.groq.com/openai/v1",
+        "models": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant",
+                   "mixtral-8x7b-32768", "gemma2-9b-it"],
+        "default_model": "llama-3.3-70b-versatile",
+        "secret_key": "groq", "requires_key": True, "free": True,
+        "rate_limit": "30 req/min, 14 400 req/jour",
+        "description": "Le plus rapide, gratuit, compatible OpenAI"
+    },
+    "Google Gemini (gratuit)": {
+        "category": "☁️ API Cloud",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "models": ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
+        "default_model": "gemini-2.5-flash",
+        "secret_key": "gemini", "requires_key": True, "free": True,
+        "rate_limit": "5-20 req/min, 20-50 req/jour",
+        "description": "Multimodal, gratuit"
+    },
+    "Mistral (gratuit)": {
+        "category": "☁️ API Cloud",
+        "base_url": "https://api.mistral.ai/v1",
+        "models": ["mistral-small-latest", "mistral-large-latest", "codestral-latest"],
+        "default_model": "mistral-small-latest",
+        "secret_key": "mistral", "requires_key": True, "free": True,
+        "rate_limit": "1 req/sec, 1B tokens/mois",
+        "description": "Gratuit, bon pour le code"
+    },
+    "Cerebras (gratuit)": {
+        "category": "☁️ API Cloud",
+        "base_url": "https://api.cerebras.ai/v1",
+        "models": ["llama3.3-70b", "llama3.1-8b", "qwen-3-32b"],
+        "default_model": "llama3.3-70b",
+        "secret_key": "cerebras", "requires_key": True, "free": True,
+        "rate_limit": "30 req/min, 1M tokens/jour",
+        "description": "Ultra-rapide, 1M tokens/jour gratuits"
+    },
+    "OpenRouter (gratuit)": {
+        "category": "☁️ API Cloud",
+        "base_url": "https://openrouter.ai/api/v1",
+        "models": ["meta-llama/llama-3.3-70b-instruct:free",
+                   "mistralai/mistral-small-3.2-24b-instruct:free",
+                   "google/gemma-2-9b-it:free",
+                   "qwen/qwen-2.5-72b-instruct:free"],
+        "default_model": "meta-llama/llama-3.3-70b-instruct:free",
+        "secret_key": "openrouter", "requires_key": True, "free": True,
+        "rate_limit": "20 req/min, 50 req/jour",
+        "description": "Accès multi-modèles via une seule API"
+    },
+    "Ollama (local)": {
+        "category": "💻 Local",
+        "base_url": "http://localhost:11434/v1",
+        "models": ["llama3.2", "llama3.1", "mistral", "qwen2.5",
+                   "phi3", "gemma2", "codellama"],
+        "default_model": "llama3.2",
+        "secret_key": None, "requires_key": False, "free": True,
+        "rate_limit": "Illimité (local)",
+        "description": "100% local, confidentiel, aucune limite"
+    },
+    "Hugging Face (spécialisé)": {
+        "category": "🧬 Spécialisé",
+        "base_url": "https://api-inference.huggingface.co/v1",
+        "models": ["ContactDoctor/Bio-Medical-Llama-3-8B",
+                   "ncbi/Gene-R1-8B",
+                   "microsoft/BioGPT-Large"],
+        "default_model": "ContactDoctor/Bio-Medical-Llama-3-8B",
+        "secret_key": "huggingface", "requires_key": True, "free": True,
+        "rate_limit": "Limité (Hugging Face Inference API)",
+        "description": "Modèles fine-tunés pour la biologie"
+    }
+}
+
+
+def get_llm_client(provider_name):
+    if provider_name not in LLM_PROVIDERS:
+        return None, "Fournisseur inconnu."
+    config = LLM_PROVIDERS[provider_name]
+
+    if not config["requires_key"]:
+        try:
+            base_url = config["base_url"]
+            try:
+                base_url = st.secrets["ollama"]["base_url"]
+            except (KeyError, Exception):
+                pass
+            return OpenAI(api_key="ollama", base_url=base_url), None
+        except Exception as e:
+            return None, f"Erreur Ollama : {e}"
+
     try:
-        resp = client.chat.completions.create(model="gpt-4o-mini", messages=messages,
-            tools=build_copilot_tools(), tool_choice="auto")
-        m = resp.choices[0].message
-        if m.tool_calls:
-            messages.append(m)
-            for tc in m.tool_calls:
-                a = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                r = execute_copilot_tool(tc.function.name, a)
-                messages.append({"role": "tool", "tool_call_id": tc.id, "content": r})
-            f = client.chat.completions.create(model="gpt-4o-mini", messages=messages)
-            return f.choices[0].message.content
-        return m.content
-    except Exception as e: return f"Erreur : {e}"
+        api_key = st.secrets[config["secret_key"]]["api_key"]
+        if not api_key or api_key.startswith("VOTRE_"):
+            return None, f"Clé API manquante pour {provider_name}."
+        return OpenAI(api_key=api_key, base_url=config["base_url"]), None
+    except KeyError:
+        return None, f"Configuration manquante : `[{config['secret_key']}]` dans secrets.toml"
+    except Exception as e:
+        return None, f"Erreur : {e}"
+
+
+def run_multi_llm_chat(user_message, history, provider_name,
+                       model_override=None, system_prompt=None,
+                       tools=None, temperature=0.3, max_tokens=2000):
+    client, error = get_llm_client(provider_name)
+    if error:
+        return f"⚠️ {error}"
+
+    config = LLM_PROVIDERS[provider_name]
+    model = model_override or config["default_model"]
+
+    if system_prompt is None:
+        system_prompt = """Tu es BioStruct Copilot, un assistant expert en bioinformatique 
+structurale, morphométrie des protéines et ingénierie des protéines. 
+Réponds en français, de manière concise et scientifique."""
+
+    messages = [{"role": "system", "content": system_prompt}] + history + \
+               [{"role": "user", "content": user_message}]
+
+    try:
+        kwargs = {"model": model, "messages": messages,
+                  "temperature": temperature, "max_tokens": max_tokens}
+        if tools and provider_name in ("OpenAI (payant)", "Groq (gratuit)"):
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        response = client.chat.completions.create(**kwargs)
+        msg = response.choices[0].message
+
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            messages.append(msg)
+            for tc in msg.tool_calls:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                result = execute_copilot_tool(tc.function.name, args)
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+            final = client.chat.completions.create(model=model, messages=messages)
+            return final.choices[0].message.content
+        return msg.content
+    except Exception as e:
+        return f"❌ Erreur avec {provider_name} ({model}) : {e}"
+
+
+def check_ollama_available():
+    try:
+        r = requests.get("http://localhost:11434/api/tags", timeout=3)
+        if r.status_code == 200:
+            return True, [m["name"] for m in r.json().get("models", [])]
+    except Exception:
+        pass
+    return False, []
+
+
+SPECIALIZED_MODELS = {
+    "Bio-Medical-Llama-3-8B": {
+        "hf_id": "ContactDoctor/Bio-Medical-Llama-3-8B",
+        "description": "LLM médical fine-tuné",
+        "specialty": "Médecine, pharmacologie",
+        "size": "8B params", "provider": "Hugging Face"
+    },
+    "Gene-R1-8B": {
+        "hf_id": "ncbi/Gene-R1-8B",
+        "description": "LLM pour l'analyse de gènes",
+        "specialty": "Génomique", "size": "8B params",
+        "provider": "NCBI / Hugging Face"
+    },
+    "BioGPT-Large": {
+        "hf_id": "microsoft/BioGPT-Large",
+        "description": "GPT-2 fine-tuné biomédical",
+        "specialty": "Extraction d'information", "size": "1.5B params",
+        "provider": "Microsoft"
+    }
+}
+
+
+def query_specialized_model(model_name, prompt, max_tokens=500):
+    if model_name not in SPECIALIZED_MODELS: return "Modèle inconnu."
+    info = SPECIALIZED_MODELS[model_name]
+    try:
+        api_key = st.secrets["huggingface"]["api_key"]
+        if not api_key or api_key.startswith("VOTRE_"):
+            return "⚠️ Clé Hugging Face manquante."
+    except (KeyError, Exception):
+        return "⚠️ Configuration Hugging Face manquante."
+
+    url = f"https://api-inference.huggingface.co/models/{info['hf_id']}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    payload = {"inputs": prompt, "parameters": {"max_new_tokens": max_tokens, "temperature": 0.3}}
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        if r.status_code == 200:
+            result = r.json()
+            if isinstance(result, list) and result:
+                return result[0].get("generated_text", str(result))
+            return str(result)
+        return f"❌ Erreur {r.status_code} : {r.text[:200]}"
+    except Exception as e:
+        return f"❌ Erreur : {e}"
 
 
 # ============================================================
 # SECTION 11 : INTERFACE STREAMLIT
 # ============================================================
 
-st.set_page_config(page_title="BioStruct AI v13", page_icon="🧬", layout="wide",
+st.set_page_config(page_title="BioStruct AI v14", page_icon="🧬", layout="wide",
                    initial_sidebar_state="expanded")
 
 defaults = {
     "user": None, "pdb_text": None, "structure": None,
     "pdb_text_b": None, "structure_b": None,
     "docking_results": [], "validation_report": None,
-    "copilot_history": [], "mode": "Débutant", "current_project": None,
+    "copilot_history": [], "mode": "Débutant",
     "signatures_library": {}, "last_signature": None,
     "landmarks": [], "multi_scale_results": [],
     "expression_matrix": None, "expression_groups": None, "de_results": None,
-    "cbio_clinical": None, "cbio_study": None,
-    "survival_data": None, "survival_result": None,
-    "ml_result": None, "gepia_data": None, "ualcan_data": None,
+    "survival_data": None, "survival_result": None, "ml_result": None,
+    "gepia_data": None, "ualcan_data": None,
     "blind_docking_results": None, "cavities": None,
     "mutation_results": None, "saturation_results": None,
     "stabilization_results": None, "disulfide_results": None,
-    "affinity_results": None, "variant_library": None,
-    "lab_protocol": None, "lab_primers": None,
-    "md_frames": None, "ppi_results": None,
-    "biomarker_results": None, "design_results": None,
+    "variant_library": None, "lab_protocol": None, "lab_primers": None,
+    "md_frames": None, "ppi_results": None, "biomarker_results": None,
+    "llm_provider": "Groq (gratuit)", "llm_model": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state: st.session_state[k] = v
 
 with st.sidebar:
-    st.title("🧬 BioStruct AI v13")
+    st.title("🧬 BioStruct AI v14")
     st.session_state.mode = st.radio("🎓 Mode", ["Débutant", "Expert"], horizontal=True)
     st.markdown("---")
     if st.session_state.user is None:
@@ -1001,69 +1101,194 @@ with st.sidebar:
             st.session_state.user = None; st.rerun()
     st.markdown("---")
     page = st.radio("Module", [
-        "🏠 Accueil", "🤖 Copilote IA", "🔬 Visualisation 3D", "🎬 Trajectoires MD",
-        "✅ Validation", "🧪 Docking", "🎯 Docking aveugle", "🔗 Docking PPI",
-        "🧬 Morphométrie", "🎯 Landmarks auto", "🔗 Morpho-topologie",
-        "🔍 Multi-échelle", "💊 Druggabilité",
-        "🌍 Variants génétiques", "🌡️ Impact environnemental", "🌐 Comparaison populations",
-        "🔬 Découverte biomarqueurs", "📊 Transcriptomique",
-        "📈 Analyse de survie", "🧬 cBioPortal", "🤖 Prédiction ML",
-        "📊 GEPIA2 (TCGA)", "🧪 UALCAN (sous-groupes)",
-        "🌐 API REST (info)",
-        "🧪 Mutagenèse in silico", "🔧 Saturation mutagenèse",
-        "🛡️ Stabilisation (PROSS-like)", "🔗 Ponts disulfures",
-        "📚 Bibliothèque de variants", "🎨 Visualisation 3D mutations",
+        "🏠 Accueil",
+        "🤖 Configuration LLM",
+        "🤖 Copilote Multi-LLM",
+        "🧬 Modèles spécialisés",
+        "🔬 Visualisation 3D",
+        "✅ Validation",
+        "🧪 Docking",
+        "🎯 Docking aveugle",
+        "🔗 Docking PPI",
+        "🧬 Morphométrie",
+        "🎯 Landmarks auto",
+        "🔗 Morpho-topologie",
+        "💊 Druggabilité",
+        "🌍 Variants génétiques",
+        "🌡️ Impact environnemental",
+        "🌐 Comparaison populations",
+        "🔬 Découverte biomarqueurs",
+        "📊 Transcriptomique",
+        "📈 Analyse de survie",
+        "🤖 Prédiction ML",
+        "📊 GEPIA2 (TCGA)",
+        "🧪 UALCAN (sous-groupes)",
+        "🧪 Mutagenèse in silico",
+        "🔧 Saturation mutagenèse",
+        "🛡️ Stabilisation (PROSS-like)",
+        "🔗 Ponts disulfures",
+        "📚 Bibliothèque de variants",
+        "🎨 Visualisation 3D mutations",
         "📋 Protocole laboratoire",
-        "👥 Collaboration", "📊 Mes Analyses"
+        "📊 Mes Analyses"
     ], label_visibility="collapsed")
 
 
-if page == "🏠 Accueil":
-    st.title("🧬 BioStruct AI v13.0")
-    st.markdown(f"""
-    ### Plateforme Intégrée de Bioinformatique Structurale et Ingénierie des Protéines
-    **Mode : {st.session_state.mode}** | **37 modules**
+# ============================================================
+# PAGES
+# ============================================================
 
-    - 🔬 Analyse : Visualisation, Validation, Docking
-    - 🧬 Morphométrie : Signature, Landmarks, Druggabilité
-    - 🌐 Génomique : Variants, Populations
-    - 📊 Transcriptomique : DE, ML
-    - 🧪 Ingénierie : Mutagenèse, Stabilisation, Protocole labo
-    - 🤖 IA : Copilote, ML
+if page == "🏠 Accueil":
+    st.title("🧬 BioStruct AI v14.0")
+    st.markdown(f"""
+    ### Plateforme Intégrée de Bioinformatique Structurale
+    **Mode : {st.session_state.mode}** | **Multi-LLM intégré**
+
+    #### Options LLM disponibles
+    - ☁️ **API Cloud gratuites** : Groq, Gemini, Mistral, Cerebras, OpenRouter
+    - 💻 **Local** : Ollama (confidentiel, illimité)
+    - 🧬 **Spécialisé** : Bio-Medical-Llama, Gene-R1-8B, BioGPT
+
+    #### Modules disponibles
+    - 🔬 Analyse structurale (visualisation, validation, docking)
+    - 🧬 Morphométrie (signature, landmarks, druggabilité)
+    - 🌐 Génomique (variants, populations)
+    - 📊 Transcriptomique (DE, ML)
+    - 🧪 Ingénierie des protéines (mutagenèse, stabilisation)
     """)
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Modules", "37"); c2.metric("Version", "13.0.0")
+    c1.metric("Modules", "30+"); c2.metric("Version", "14.0.0")
     c3.metric("Signatures", len(st.session_state.signatures_library))
-    c4.metric("Statut", "✅ Opérationnel")
+    c4.metric("LLM actif", st.session_state.llm_provider)
 
 
-elif page == "🤖 Copilote IA":
-    st.title("🤖 BioStruct Copilot")
-    if not get_openai_client(): st.warning("⚠️ Clé OpenAI manquante.")
+elif page == "🤖 Configuration LLM":
+    st.title("🤖 Configuration Multi-LLM")
+    st.markdown("### 📊 Statut des fournisseurs")
+
+    status_rows = []
+    for name, cfg in LLM_PROVIDERS.items():
+        if not cfg["requires_key"]:
+            available, _ = check_ollama_available()
+            status = "✅ Disponible" if available else "❌ Non lancé"
+        else:
+            try:
+                key = st.secrets[cfg["secret_key"]]["api_key"]
+                status = "✅ Configuré" if key and not key.startswith("VOTRE_") else "⚠️ Clé manquante"
+            except (KeyError, Exception):
+                status = "⚠️ Non configuré"
+        status_rows.append({"Fournisseur": name, "Catégorie": cfg["category"],
+                           "Gratuit": "✅" if cfg["free"] else "💰",
+                           "Statut": status, "Limite": cfg["rate_limit"]})
+    st.dataframe(pd.DataFrame(status_rows), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.markdown("### 🎯 Sélection du fournisseur actif")
+    categories = ["☁️ API Cloud", "💻 Local", "🧬 Spécialisé"]
+    selected_cat = st.selectbox("Catégorie", categories)
+    providers_in_cat = [n for n, c in LLM_PROVIDERS.items() if c["category"] == selected_cat]
+
+    if providers_in_cat:
+        selected_provider = st.selectbox("Fournisseur", providers_in_cat)
+        config = LLM_PROVIDERS[selected_provider]
+        model = st.selectbox("Modèle", config["models"],
+                             index=config["models"].index(config["default_model"]))
+
+        if selected_provider == "Ollama (local)":
+            available, models = check_ollama_available()
+            if not available:
+                st.error("⚠️ Ollama n'est pas lancé. Exécutez `ollama serve`.")
+                st.code("""
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull llama3.2
+ollama serve
+                """, language="bash")
+            else:
+                st.success(f"✅ Ollama disponible ({len(models)} modèles)")
+                if models:
+                    model = st.selectbox("Modèles installés", models)
+
+        st.info(f"**Description** : {config['description']} | **Limite** : {config['rate_limit']}")
+
+        if st.button("🔌 Tester la connexion", type="primary", use_container_width=True):
+            with st.spinner("Test en cours..."):
+                response = run_multi_llm_chat("Dis bonjour.", [], selected_provider,
+                                              model_override=model, max_tokens=100)
+                if response and not response.startswith(("❌", "⚠️")):
+                    st.success("✅ Connexion réussie !")
+                    st.markdown(f"**Réponse** : {response}")
+                    st.session_state.llm_provider = selected_provider
+                    st.session_state.llm_model = model
+                else:
+                    st.error(response)
+
+
+elif page == "🤖 Copilote Multi-LLM":
+    st.title("🤖 BioStruct Copilot (Multi-LLM)")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        provider = st.selectbox("Fournisseur LLM", list(LLM_PROVIDERS.keys()),
+                                index=list(LLM_PROVIDERS.keys()).index(st.session_state.llm_provider))
+    with col2:
+        config = LLM_PROVIDERS[provider]
+        model = st.selectbox("Modèle", config["models"],
+                             index=config["models"].index(config["default_model"]))
+
+    client, error = get_llm_client(provider)
+    if error:
+        st.warning(f"⚠️ {error}")
+        st.info("💡 Allez dans **🤖 Configuration LLM** pour configurer.")
+
     for msg in st.session_state.copilot_history:
         with st.chat_message(msg["role"]): st.markdown(msg["content"])
-    if prompt := st.chat_input("Ex: Charge 1A2C et valide-la"):
+
+    if prompt := st.chat_input(f"Posez votre question à {provider}..."):
         st.session_state.copilot_history.append({"role": "user", "content": prompt})
         with st.chat_message("user"): st.markdown(prompt)
         with st.chat_message("assistant"):
-            with st.spinner("Réflexion..."):
-                resp = run_copilot(prompt, st.session_state.copilot_history[:-1])
-                st.markdown(resp)
-        st.session_state.copilot_history.append({"role": "assistant", "content": resp})
+            with st.spinner(f"Réflexion via {provider}..."):
+                tools = build_copilot_tools() if provider in ("OpenAI (payant)", "Groq (gratuit)") else None
+                response = run_multi_llm_chat(prompt, st.session_state.copilot_history[:-1],
+                                              provider, model_override=model, tools=tools)
+                st.markdown(response)
+        st.session_state.copilot_history.append({"role": "assistant", "content": response})
+
+    if st.session_state.copilot_history:
+        if st.button("🗑️ Effacer la conversation", use_container_width=True):
+            st.session_state.copilot_history = []; st.rerun()
+
+
+elif page == "🧬 Modèles spécialisés":
+    st.title("🧬 Modèles Spécialisés en Biologie")
+    rows = [{"Modèle": k, "Description": v["description"],
+             "Spécialité": v["specialty"], "Taille": v["size"]}
+            for k, v in SPECIALIZED_MODELS.items()]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    model_name = st.selectbox("Modèle", list(SPECIALIZED_MODELS.keys()))
+    info = SPECIALIZED_MODELS[model_name]
+    st.info(f"**{model_name}** — {info['description']} | **Spécialité** : {info['specialty']}")
+
+    prompt = st.text_area("Votre question",
+        value="Explique le rôle de la protéine Tau dans la maladie d'Alzheimer.", height=100)
+
+    if st.button("🚀 Interroger", type="primary", use_container_width=True):
+        with st.spinner(f"Interrogation de {model_name}..."):
+            st.markdown(query_specialized_model(model_name, prompt))
 
 
 elif page == "🔬 Visualisation 3D":
-    st.title("🔬 Visualisation de Structures")
+    st.title("🔬 Visualisation 3D")
     col1, col2 = st.columns([1, 3])
     with col1:
         pdb_id = st.text_input("ID PDB", value="1A2C").strip()
         if st.button("📥 Charger", use_container_width=True):
-            with st.spinner("Téléchargement..."):
-                try:
-                    st.session_state.pdb_text = fetch_pdb_structure(pdb_id)
-                    st.session_state.structure = parse_pdb_structure(st.session_state.pdb_text)
-                    st.success("Chargée !")
-                except Exception as e: st.error(f"Erreur : {e}")
+            try:
+                st.session_state.pdb_text = fetch_pdb_structure(pdb_id)
+                st.session_state.structure = parse_pdb_structure(st.session_state.pdb_text)
+                st.success("Chargée !")
+            except Exception as e: st.error(f"Erreur : {e}")
         if st.session_state.structure:
             for k, v in get_structure_info(st.session_state.structure).items():
                 st.write(f"**{k}:** {v}")
@@ -1074,21 +1299,7 @@ elif page == "🔬 Visualisation 3D":
             view = py3Dmol.view(width=800, height=600)
             view.addModel(st.session_state.pdb_text, "pdb")
             view.setStyle({style: {"color": color}})
-            view.zoomTo()
-            showmol(view, height=600, width=800)
-
-
-elif page == "🎬 Trajectoires MD":
-    st.title("🎬 Trajectoires MD")
-    uploaded = st.file_uploader("Fichier PDB multi-model", type=["pdb"])
-    if uploaded:
-        st.session_state.md_frames = [uploaded.read().decode("utf-8", errors="ignore")]
-    if st.session_state.get("md_frames"):
-        view = py3Dmol.view(width=800, height=500)
-        view.addModel(st.session_state.md_frames[0], "pdb")
-        view.setStyle({"cartoon": {"color": "spectrum"}})
-        view.zoomTo()
-        showmol(view, height=500, width=800)
+            view.zoomTo(); showmol(view, height=600, width=800)
 
 
 elif page == "✅ Validation":
@@ -1097,8 +1308,7 @@ elif page == "✅ Validation":
         st.warning("Chargez une structure.")
     else:
         if st.button("🚀 Valider", type="primary", use_container_width=True):
-            with st.spinner("Validation..."):
-                st.session_state.validation_report = validate_structure(st.session_state.structure)
+            st.session_state.validation_report = validate_structure(st.session_state.structure)
         if st.session_state.validation_report:
             r = st.session_state.validation_report
             c1, c2, c3 = st.columns(3)
@@ -1109,7 +1319,7 @@ elif page == "✅ Validation":
 
 
 elif page == "🧪 Docking":
-    st.title("🧪 Docking Moléculaire")
+    st.title("🧪 Docking")
     if st.session_state.pdb_text is None:
         st.warning("Chargez une structure.")
     else:
@@ -1119,9 +1329,8 @@ elif page == "🧪 Docking":
         cz = st.number_input("Centre Z", value=0.0)
         smiles = st.text_area("SMILES", value="CC(=O)OC1=CC=CC=C1C(=O)O")
         if st.button("🚀 Docking", type="primary", use_container_width=True):
-            with st.spinner("En cours..."):
-                st.session_state.docking_results = run_docking(
-                    st.session_state.pdb_text, smiles, (cx, cy, cz), (20.0, 20.0, 20.0))
+            st.session_state.docking_results = run_docking(
+                st.session_state.pdb_text, smiles, (cx, cy, cz), (20.0, 20.0, 20.0))
         if st.session_state.docking_results:
             st.dataframe(pd.DataFrame(st.session_state.docking_results)[["Pose", "Score (kcal/mol)"]],
                          use_container_width=True)
@@ -1133,23 +1342,20 @@ elif page == "🎯 Docking aveugle":
         st.warning("Chargez une structure.")
     else:
         if st.button("🔍 Détecter les poches", type="primary", use_container_width=True):
-            with st.spinner("Détection..."):
-                st.session_state.cavities = detect_cavities(st.session_state.structure)
-                st.success(f"✅ {len(st.session_state.cavities)} poches")
+            st.session_state.cavities = detect_cavities(st.session_state.structure)
+            st.success(f"✅ {len(st.session_state.cavities)} poches")
         if st.session_state.cavities:
-            st.dataframe(pd.DataFrame([{"Poche": f"Poche_{i+1}",
-                "Volume (Å³)": c["volume_A3"], "Druggabilité": c.get("druggabilité")}
-                for i, c in enumerate(st.session_state.cavities)]),
+            st.dataframe(pd.DataFrame([{"Poche": f"P{i+1}", "Volume (Å³)": c["volume_A3"],
+                "Druggabilité": c.get("druggabilité")} for i, c in enumerate(st.session_state.cavities)]),
                 use_container_width=True, hide_index=True)
             smiles = st.text_area("SMILES", value="CC(=O)OC1=CC=CC=C1C(=O)O", key="sb")
             if st.button("🚀 Docking aveugle", use_container_width=True):
                 results = []
                 for i, cav in enumerate(st.session_state.cavities):
-                    box_size = max(15, min(30, (cav["volume_A3"] ** (1/3)) * 4))
-                    dr = run_docking(st.session_state.pdb_text, smiles, cav["center"],
-                                    (box_size, box_size, box_size))
+                    box = max(15, min(30, (cav["volume_A3"] ** (1/3)) * 4))
+                    dr = run_docking(st.session_state.pdb_text, smiles, cav["center"], (box, box, box))
                     best = min(d["Score (kcal/mol)"] for d in dr)
-                    results.append({"Poche": f"Poche_{i+1}", "Volume": cav["volume_A3"],
+                    results.append({"Poche": f"P{i+1}", "Volume": cav["volume_A3"],
                                    "Meilleur score": round(best, 2)})
                 st.session_state.blind_docking_results = sorted(results, key=lambda x: x["Meilleur score"])
                 st.dataframe(pd.DataFrame(st.session_state.blind_docking_results),
@@ -1166,7 +1372,7 @@ elif page == "🔗 Docking PPI":
             try:
                 st.session_state.pdb_text_b = fetch_pdb_structure(pdb_b)
                 st.session_state.structure_b = parse_pdb_structure(st.session_state.pdb_text_b)
-                st.success(f"Protéine B chargée")
+                st.success("Protéine B chargée")
             except Exception as e: st.error(f"Erreur : {e}")
         if st.session_state.get("structure_b"):
             cutoff = st.slider("Distance contact (Å)", 3.0, 10.0, 6.0)
@@ -1189,12 +1395,11 @@ elif page == "🧬 Morphométrie":
     else:
         label = st.text_input("Label", value=st.session_state.structure.header.get("idcode", "Protéine"))
         if st.button("🔬 Calculer", type="primary", use_container_width=True):
-            with st.spinner("Calcul..."):
-                sig = compute_signature(st.session_state.structure, label)
-                if sig:
-                    st.session_state.last_signature = sig
-                    st.session_state.signatures_library[label] = sig
-                    st.success(f"✅ {label}")
+            sig = compute_signature(st.session_state.structure, label)
+            if sig:
+                st.session_state.last_signature = sig
+                st.session_state.signatures_library[label] = sig
+                st.success(f"✅ {label}")
         if st.session_state.last_signature:
             sig = st.session_state.last_signature
             m1, m2, m3, m4 = st.columns(4)
@@ -1203,8 +1408,8 @@ elif page == "🧬 Morphométrie":
             m3.metric("Compacité", sig.get('compacité'))
             m4.metric("Résidus", sig.get('nb_résidus'))
             st.dataframe(pd.DataFrame([{"Propriété": k, "Valeur": v}
-                for k, v in sig.items() if isinstance(v, (int, float))
-                and not k.startswith("freq_")]), use_container_width=True, hide_index=True)
+                for k, v in sig.items() if isinstance(v, (int, float)) and not k.startswith("freq_")]),
+                use_container_width=True, hide_index=True)
 
 
 elif page == "🎯 Landmarks auto":
@@ -1216,8 +1421,7 @@ elif page == "🎯 Landmarks auto":
         if st.button("🔍 Détecter", type="primary", use_container_width=True):
             st.session_state.landmarks = detect_landmarks(st.session_state.structure, n)
         if st.session_state.landmarks:
-            st.dataframe(pd.DataFrame(st.session_state.landmarks),
-                        use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(st.session_state.landmarks), use_container_width=True, hide_index=True)
             view = py3Dmol.view(width=800, height=500)
             view.addModel(st.session_state.pdb_text, "pdb")
             view.setStyle({"cartoon": {"color": "lightgray"}})
@@ -1238,22 +1442,6 @@ elif page == "🔗 Morpho-topologie":
         c2.metric("Classe", idx["classification_morpho_topo"])
         c1, c2 = st.columns(2)
         c1.metric("Axe Forme", idx["forme_axe"]); c2.metric("Axe Topologie", idx["topologie_axe"])
-
-
-elif page == "🔍 Multi-échelle":
-    st.title("🔍 Analyse Multi-échelle")
-    if st.session_state.structure is None:
-        st.warning("Chargez une structure.")
-    else:
-        chains = [c.id for c in st.session_state.structure.get_chains()]
-        chain_id = st.selectbox("Chaîne", chains)
-        if st.button("🔬 Analyser", use_container_width=True):
-            chain = st.session_state.structure[0][chain_id]
-            coords = [r["CA"].coord for r in chain.get_residues() if r.id[0] == " " and "CA" in r]
-            if len(coords) >= 5:
-                sig = extract_shape_descriptors(np.array(coords))
-                st.dataframe(pd.DataFrame([{"Propriété": k, "Valeur": v} for k, v in sig.items()]),
-                            use_container_width=True, hide_index=True)
 
 
 elif page == "💊 Druggabilité":
@@ -1298,8 +1486,7 @@ elif page == "🌡️ Impact environnemental":
         if temp > 40: stab -= 0.5 * (temp - 40) / 10
         if salt > 500: stab -= 0.3 * (salt - 500) / 500
         if alt > 2000: stab -= 0.2 * (alt - 2000) / 3000
-        stab = max(0, min(100, stab))
-        st.metric("Stabilité globale", f"{stab:.1f}/100")
+        st.metric("Stabilité globale", f"{max(0, min(100, stab)):.1f}/100")
 
 
 elif page == "🌐 Comparaison populations":
@@ -1314,8 +1501,7 @@ elif page == "🌐 Comparaison populations":
                 for allele, freqs in alleles.items():
                     diff = abs(freqs.get(pa, 0) - freqs.get(pb, 0)) * 100
                     rows.append({"Gène": gene, "rsID": rsid, "Allèle": allele,
-                                f"Fréq {pa}": freqs.get(pa, 0),
-                                f"Fréq {pb}": freqs.get(pb, 0),
+                                f"Fréq {pa}": freqs.get(pa, 0), f"Fréq {pb}": freqs.get(pb, 0),
                                 "Différence (%)": round(diff, 2)})
         st.dataframe(pd.DataFrame(rows).sort_values("Différence (%)", ascending=False),
                     use_container_width=True, hide_index=True)
@@ -1344,8 +1530,7 @@ elif page == "🔬 Découverte biomarqueurs":
             feature_cols = [c for c in df.columns if c not in ("label", "_group")]
             if st.button("🔬 Analyser", type="primary", use_container_width=True):
                 df_stats = statistical_test_features(df, [ga, gb], feature_cols)
-                df_ranked = rank_biomarkers(df_stats)
-                st.session_state.biomarker_results = {"df_stats": df_stats, "df_ranked": df_ranked}
+                st.session_state.biomarker_results = {"df_ranked": rank_biomarkers(df_stats)}
             if st.session_state.biomarker_results:
                 st.dataframe(st.session_state.biomarker_results["df_ranked"].head(10),
                             use_container_width=True, hide_index=True)
@@ -1372,8 +1557,7 @@ elif page == "📈 Analyse de survie":
     else:
         uploaded = st.file_uploader("CSV survie (colonnes T, E)", type=["csv"])
         if uploaded:
-            df = pd.read_csv(uploaded)
-            st.session_state.survival_data = df
+            st.session_state.survival_data = pd.read_csv(uploaded)
         if st.session_state.survival_data is not None:
             df = st.session_state.survival_data
             if "T" in df.columns and "E" in df.columns:
@@ -1383,17 +1567,6 @@ elif page == "📈 Analyse de survie":
                     st.session_state.survival_result = kmf
                 if st.session_state.get("survival_result"):
                     st.write(f"Survie médiane : {st.session_state.survival_result.median_survival_time_}")
-
-
-elif page == "🧬 cBioPortal":
-    st.title("🧬 cBioPortal")
-    study = st.text_input("Study ID", value="luad_tcga")
-    if st.button("🔍 Charger", use_container_width=True):
-        try:
-            r = requests.get(f"https://www.cbioportal.org/api/studies/{study}", timeout=20)
-            if r.status_code == 200: st.json(r.json())
-            else: st.error("Étude non trouvée.")
-        except Exception as e: st.error(f"Erreur : {e}")
 
 
 elif page == "🤖 Prédiction ML":
@@ -1442,24 +1615,6 @@ elif page == "🧪 UALCAN (sous-groupes)":
         st.dataframe(df.head(20), use_container_width=True, hide_index=True)
 
 
-elif page == "🌐 API REST (info)":
-    st.title("🌐 API REST Publique")
-    st.markdown("""
-    ### Endpoints disponibles
-    - POST `/validate` — validation structure
-    - POST `/morphometrics` — signature morphométrique
-    - POST `/dock` — docking
-    - POST `/biomarkers` — biomarqueurs
-
-    ### Déploiement
-    ```bash
-    # Fichier api_server.py à créer avec FastAPI
-    uvicorn api_server:app --host 0.0.0.0 --port 8000
-    # Documentation : http://localhost:8000/docs
-    ```
-    """)
-
-
 elif page == "🧪 Mutagenèse in silico":
     st.title("🧪 Mutagenèse In Silico")
     if st.session_state.structure is None:
@@ -1472,8 +1627,7 @@ elif page == "🧪 Mutagenèse in silico":
             with c1: chain = st.text_input(f"Chaîne {i+1}", value="A", key=f"m_ch_{i}")
             with c2: pos = st.number_input(f"Position {i+1}", value=1, key=f"m_pos_{i}")
             with c3: new_aa = st.selectbox(f"→ AA", list(AA_PROPERTIES.keys()), key=f"m_aa_{i}")
-            try:
-                orig = st.session_state.structure[0][chain][(" ", pos, " ")].resname
+            try: orig = st.session_state.structure[0][chain][(" ", pos, " ")].resname
             except Exception: orig = "ALA"
             mutations.append({"Chaîne": chain, "Position": pos, "Original": orig, "Mutant": new_aa})
         if st.button("🔬 Analyser", type="primary", use_container_width=True):
@@ -1483,8 +1637,7 @@ elif page == "🧪 Mutagenèse in silico":
                 if imp:
                     results.append({"Mutation": imp["mutation"],
                                    "ΔΔG (kcal/mol)": imp["ΔΔG_prédit"],
-                                   "Stabilité": imp["stabilité"],
-                                   "Accessibilité": imp["accessibilité"]})
+                                   "Stabilité": imp["stabilité"]})
             st.session_state.mutation_results = pd.DataFrame(results)
         if st.session_state.mutation_results is not None:
             st.dataframe(st.session_state.mutation_results, use_container_width=True, hide_index=True)
@@ -1513,12 +1666,10 @@ elif page == "🛡️ Stabilisation (PROSS-like)":
     if st.session_state.structure is None:
         st.warning("Chargez une structure.")
     else:
-        if st.button("🔬 Proposer des mutations stabilisantes", type="primary", use_container_width=True):
+        if st.button("🔬 Proposer des mutations", type="primary", use_container_width=True):
             st.session_state.stabilization_results = propose_stabilizing_mutations(st.session_state.structure)
         if st.session_state.stabilization_results is not None and len(st.session_state.stabilization_results) > 0:
             st.dataframe(st.session_state.stabilization_results, use_container_width=True, hide_index=True)
-        else:
-            st.info("Aucune mutation stabilisante évidente détectée.")
 
 
 elif page == "🔗 Ponts disulfures":
@@ -1530,13 +1681,6 @@ elif page == "🔗 Ponts disulfures":
             st.session_state.disulfide_results = identify_disulfide_opportunities(st.session_state.structure)
         if st.session_state.disulfide_results is not None and len(st.session_state.disulfide_results) > 0:
             st.dataframe(st.session_state.disulfide_results, use_container_width=True, hide_index=True)
-            view = py3Dmol.view(width=800, height=500)
-            view.addModel(st.session_state.pdb_text, "pdb")
-            view.setStyle({"cartoon": {"color": "lightgray"}})
-            view.addStyle({"resn": "CYS"}, {"stick": {"color": "yellow"}})
-            view.zoomTo(); showmol(view, height=500, width=800)
-        else:
-            st.info("Aucune paire CYS optimale (4-8 Å) trouvée.")
 
 
 elif page == "📚 Bibliothèque de variants":
@@ -1549,13 +1693,13 @@ elif page == "📚 Bibliothèque de variants":
         try: positions = [int(p.strip()) for p in positions_str.split(",") if p.strip()]
         except Exception: positions = []
         if positions:
-            if st.button("🎨 Générer la bibliothèque", type="primary", use_container_width=True):
+            if st.button("🎨 Générer", type="primary", use_container_width=True):
                 with st.spinner("Génération..."):
                     st.session_state.variant_library = generate_variant_library(
                         st.session_state.structure, [(chain, p) for p in positions])
             if st.session_state.get("variant_library") is not None:
                 df = st.session_state.variant_library
-                st.success(f"✅ {len(df)} variants générés")
+                st.success(f"✅ {len(df)} variants")
                 st.dataframe(df.head(50), use_container_width=True, hide_index=True)
                 st.download_button("📥 CSV", df.to_csv(index=False).encode(),
                                    "variant_library.csv", "text/csv")
@@ -1568,17 +1712,15 @@ elif page == "🎨 Visualisation 3D mutations":
     else:
         ddg_data = []
         if st.session_state.mutation_results is not None:
-            df = st.session_state.mutation_results
-            ddg_data = [{"Mutation": row["Mutation"], "ΔΔG": row["ΔΔG (kcal/mol)"]}
-                        for _, row in df.iterrows()]
+            ddg_data = [{"Mutation": r["Mutation"], "ΔΔG": r["ΔΔG (kcal/mol)"],
+                        "Position": r["Mutation"]} for _, r in st.session_state.mutation_results.iterrows()]
         elif st.session_state.get("variant_library") is not None:
             df = st.session_state.variant_library.head(30)
-            ddg_data = [{"Mutation": row["Variant_ID"], "ΔΔG": row["ΔΔG (kcal/mol)"]}
-                        for _, row in df.iterrows()]
+            ddg_data = [{"Mutation": r["Variant_ID"], "ΔΔG": r["ΔΔG (kcal/mol)"]}
+                        for _, r in df.iterrows()]
         if not ddg_data:
             st.warning("Générez d'abord des mutations.")
         else:
-            st.success(f"✅ {len(ddg_data)} mutations")
             view = py3Dmol.view(width=800, height=600)
             view.addModel(st.session_state.pdb_text, "pdb")
             view.setStyle({"cartoon": {"color": "lightgray"}})
@@ -1609,7 +1751,7 @@ elif page == "📋 Protocole laboratoire":
                 mutations.append({"Original": mut[:3], "Position": pos, "Mutant": mut[-3:]})
             except Exception: continue
         if mutations:
-            enzyme = st.selectbox("Enzyme polymérase", ["Q5", "PfuUltra", "Phusion", "KOD"])
+            enzyme = st.selectbox("Enzyme", ["Q5", "PfuUltra", "Phusion", "KOD"])
             if st.button("📋 Générer le protocole", type="primary", use_container_width=True):
                 protocol, primers = generate_lab_protocol(st.session_state.structure, mutations, enzyme)
                 st.session_state.lab_protocol = protocol
@@ -1620,33 +1762,10 @@ elif page == "📋 Protocole laboratoire":
                                    "protocole.txt", "text/plain")
 
 
-elif page == "👥 Collaboration":
-    st.title("👥 Projets Collaboratifs")
+elif page == "📊 Mes Analyses":
+    st.title("📊 Historique de mes Analyses")
     if not st.session_state.user or st.session_state.user.get("offline"):
         st.warning("Connectez-vous avec Supabase configuré.")
-    else:
-        tab1, tab2 = st.tabs(["📁 Mes projets", "➕ Créer / Rejoindre"])
-        with tab1:
-            for p in get_user_projects(st.session_state.user["id"]):
-                with st.expander(f"📁 {p['name']} (ID: {p['id']})"):
-                    if st.button("Sélectionner", key=f"s_{p['id']}"):
-                        st.session_state.current_project = p
-        with tab2:
-            new_name = st.text_input("Nom du projet")
-            if st.button("Créer", use_container_width=True):
-                if new_name:
-                    proj = create_project(st.session_state.user["id"], new_name)
-                    if proj: st.success(f"Créé (ID: {proj['id']})")
-            jid = st.number_input("ID à rejoindre", min_value=1, step=1)
-            if st.button("Rejoindre", use_container_width=True):
-                if join_project(jid, st.session_state.user["id"]):
-                    st.success(f"Rejoint {jid}")
-
-
-elif page == "📊 Mes Analyses":
-    st.title("📊 Historique")
-    if not st.session_state.user or st.session_state.user.get("offline"):
-        st.warning("Connectez-vous.")
     else:
         analyses = load_analyses(st.session_state.user["id"])
         if not analyses:
@@ -1658,4 +1777,4 @@ elif page == "📊 Mes Analyses":
 
 # --- PIED DE PAGE ---
 st.markdown("---")
-st.caption("🧬 **BioStruct AI v13.0** — 37 modules | Bioinformatique structurale & ingénierie des protéines")
+st.caption("🧬 **BioStruct AI v14.0** — Multi-LLM (Cloud gratuit, Local, Spécialisé)")
